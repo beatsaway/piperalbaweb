@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alba sings</title>
+  <style>
+    :root { --ink: #141414; --muted: #737373; --line: #ececec; --soft: #f7f7f7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: var(--ink); background: #fff; font: 15px/1.5 "Segoe UI", system-ui, sans-serif; }
+    main { width: min(680px, calc(100% - 40px)); margin: 0 auto; padding: 56px 0 80px; }
+    .mark { margin: 0 0 18px; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+    h1 { margin: 0; font-size: 40px; line-height: 1.05; font-weight: 560; letter-spacing: -0.045em; }
+    .lede { margin: 12px 0 28px; max-width: 48ch; color: var(--muted); }
+    .lede a { color: var(--ink); }
+    .panel { background: #fff; border: 1px solid var(--line); border-radius: 20px; padding: 20px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03); }
+    label { display: block; margin-bottom: 8px; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+    textarea, select { width: 100%; border: 1px solid var(--line); border-radius: 14px; font: inherit; color: inherit; background: #fff; }
+    textarea { min-height: 120px; resize: vertical; padding: 14px 16px; background: var(--soft); }
+    textarea:focus, select:focus { outline: none; border-color: #cfcfcf; background: #fff; }
+    select { height: 40px; padding: 0 10px; }
+    .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+    output { font-variant-numeric: tabular-nums; color: var(--ink); }
+    input[type="range"] { width: 100%; accent-color: #141414; }
+    .actions { display: flex; gap: 14px; align-items: center; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+    button { border: 0; background: var(--ink); color: #fff; border-radius: 999px; padding: 11px 20px; font: inherit; font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: 0.4; cursor: progress; }
+    audio { width: min(360px, 100%); height: 36px; }
+    .melody { margin: 14px 0 0; color: var(--ink); font-size: 14px; letter-spacing: -0.01em; }
+    .status { margin: 8px 0 0; min-height: 1.4em; color: var(--muted); font-size: 13px; }
+    .status.error { color: #9f2d2d; }
+    #gate { min-height: 100vh; display: grid; place-items: center; padding: 32px; background: #fff; }
+    .gate-card { width: min(360px, 100%); }
+    .gate-card h1 { font-size: 28px; margin-bottom: 18px; }
+    .track { height: 2px; background: #ececec; border-radius: 99px; overflow: hidden; }
+    .track span { display: block; height: 100%; width: 0; background: #141414; transition: width 0.2s ease; }
+    #gate-status { margin: 12px 0 0; color: #737373; font-size: 13px; }
+    #gate-status.error { color: #9f2d2d; }
+    main[hidden] { display: none; }
+    @media (max-width: 640px) { h1 { font-size: 32px; } .controls, .actions { display: grid; } audio { width: 100%; } }
+  </style>
+</head>
+<body>
+  <div id="gate">
+    <div class="gate-card">
+      <p class="mark">Alba</p>
+      <h1>Preparing voice</h1>
+      <div class="track" aria-hidden="true"><span id="bar"></span></div>
+      <p id="gate-status">Starting…</p>
+    </div>
+  </div>
+  <main hidden>
+    <p class="mark">Major scale</p>
+    <h1>Alba sings</h1>
+    <p class="lede">Each syllable gets a random note from a major scale and a random musical length. <a href="index.html">Back to speech</a>.</p>
+    <section class="panel">
+      <label for="text">Sentence</label>
+      <textarea id="text">Sing across the harbour lights.</textarea>
+      <div class="controls">
+        <div>
+          <label for="key">Key</label>
+          <select id="key">
+            <option>C</option><option>D</option><option>E</option><option>F</option>
+            <option selected>G</option><option>A</option><option>B</option>
+          </select>
+        </div>
+        <div>
+          <label for="tempo">Tempo <output id="tempo-out">96</output></label>
+          <input id="tempo" type="range" min="72" max="132" step="2" value="96">
+        </div>
+      </div>
+      <div class="actions">
+        <button id="sing" type="button">Sing</button>
+        <audio id="player" controls></audio>
+      </div>
+      <p class="melody" id="melody"></p>
+      <p class="status" id="status" role="status">Ready.</p>
+    </section>
+  </main>
+  <script src="phonemize/piper_phonemize.js"></script>
+  <script src="vendor/ort.min.js?v=118"></script>
+  <script>
+    const MODEL = "voice/en_GB-alba-medium.onnx";
+    const CONFIG = "voice/en_GB-alba-medium.onnx.json";
+    const VOWELS = new Set([..."əʊɜaeiouɪɔæɑɛʌɒɐøœy"]);
+    const SCALE = [0, 2, 4, 5, 7, 9, 11];
+    const LENGTHS = [
+      { beats: 0.5, name: "eighth" },
+      { beats: 1, name: "quarter" },
+      { beats: 1, name: "quarter" },
+      { beats: 1.5, name: "dotted quarter" },
+      { beats: 2, name: "half" },
+    ];
+    const KEY_MIDI = { C: 60, D: 62, E: 64, F: 65, G: 67, A: 69, B: 71 };
+    const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+    const gate = document.querySelector("#gate");
+    const gateStatus = document.querySelector("#gate-status");
+    const bar = document.querySelector("#bar");
+    const app = document.querySelector("main");
+    const statusEl = document.querySelector("#status");
+    const melodyEl = document.querySelector("#melody");
+    const player = document.querySelector("#player");
+    const singBtn = document.querySelector("#sing");
+    const tempo = document.querySelector("#tempo");
+    document.querySelector("#tempo-out").textContent = tempo.value;
+    tempo.addEventListener("input", () => { document.querySelector("#tempo-out").textContent = tempo.value; });
+
+    let session = null;
+    let sampleRate = 22050;
+    let noiseScale = 0.667;
+    let noiseW = 0.8;
+    let espeakVoice = "en-gb-x-rp";
+    let idMap = null;
+    let phonemizer = null;
+    let lastUrl = "";
+    const phonemeLines = [];
+
+    function setStatus(message, isError = false) {
+      statusEl.textContent = message;
+      statusEl.classList.toggle("error", isError);
+    }
+    function setGate(message, percent, isError = false) {
+      gateStatus.textContent = message;
+      gateStatus.classList.toggle("error", isError);
+      if (percent != null) bar.style.width = `${percent}%`;
+    }
+    function floatToWav(samples, rate) {
+      const pcm = new Int16Array(samples.length);
+      for (let i = 0; i < samples.length; i++) {
+        const sample = Math.max(-1, Math.min(1, samples[i]));
+        pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      }
+      const buffer = new ArrayBuffer(44 + pcm.byteLength);
+      const view = new DataView(buffer);
+      const write = (at, text) => { for (let i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i)); };
+      write(0, "RIFF");
+      view.setUint32(4, 36 + pcm.byteLength, true);
+      write(8, "WAVE");
+      write(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, rate, true);
+      view.setUint32(28, rate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      write(36, "data");
+      view.setUint32(40, pcm.byteLength, true);
+      new Int16Array(buffer, 44).set(pcm);
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+    async function loadPhonemizer() {
+      if (phonemizer) return phonemizer;
+      setGate("Loading phonemizer…", 8);
+      phonemizer = await createPiperPhonemize({
+        locateFile: (path) => `phonemize/${path}`,
+        print: (data) => phonemeLines.push(String(data)),
+        printErr: (line) => console.warn(line),
+      });
+      return phonemizer;
+    }
+    function phonemesFor(text) {
+      phonemeLines.length = 0;
+      phonemizer.callMain(["-l", espeakVoice, "--input", JSON.stringify([{ text }]), "--espeak_data", "/espeak-ng-data"]);
+      const phonemes = [];
+      for (const raw of phonemeLines) {
+        const line = raw.trim();
+        if (!line.startsWith("{")) continue;
+        const parsed = JSON.parse(line);
+        if (parsed.phonemes) phonemes.push(...parsed.phonemes);
+      }
+      return phonemes;
+    }
+    function syllabify(phonemes) {
+      const syllables = [];
+      let buffer = [];
+      let vowels = 0;
+      const flush = () => {
+        const cleaned = buffer.filter((phone) => phone !== " ");
+        if (cleaned.length) syllables.push(cleaned);
+        buffer = [];
+        vowels = 0;
+      };
+      for (const phone of phonemes) {
+        if (phone === " " || phone === "." || phone === "," || phone === "!" || phone === "?") {
+          flush();
+          continue;
+        }
+        if (VOWELS.has(phone) && vowels > 0 && !VOWELS.has(buffer[buffer.length - 1])) flush();
+        buffer.push(phone);
+        if (VOWELS.has(phone)) vowels += 1;
+      }
+      flush();
+      return syllables;
+    }
+    function idsFor(phonemes) {
+      const ids = [...idMap["^"]];
+      const pad = idMap["_"];
+      for (const phone of phonemes) {
+        const token = idMap[phone];
+        if (!token) continue;
+        ids.push(...token, ...pad);
+      }
+      ids.push(...idMap["$"]);
+      return ids;
+    }
+    async function loadVoice() {
+      if (session) return;
+      const config = await (await fetch(CONFIG)).json();
+      sampleRate = config.audio.sample_rate;
+      noiseScale = config.inference.noise_scale;
+      noiseW = config.inference.noise_w;
+      espeakVoice = config.espeak.voice || espeakVoice;
+      idMap = config.phoneme_id_map;
+      setGate("Loading Alba…", 18);
+      const response = await fetch(MODEL);
+      const total = Number(response.headers.get("Content-Length")) || 0;
+      const reader = response.body.getReader();
+      const parts = [];
+      let loaded = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        loaded += value.byteLength;
+        if (total) setGate(`Loading Alba… ${Math.round(loaded / total * 100)}%`, 18 + (loaded / total) * 70);
+      }
+      const model = new Uint8Array(loaded);
+      let offset = 0;
+      for (const part of parts) { model.set(part, offset); offset += part.byteLength; }
+      setGate("Starting the voice…", 92);
+      ort.env.wasm.wasmPaths = "vendor/118/";
+      ort.env.wasm.numThreads = 1;
+      ort.env.wasm.simd = true;
+      session = await ort.InferenceSession.create(model, { executionProviders: ["wasm"] });
+    }
+    async function speakIds(ids) {
+      const result = await session.run({
+        input: new ort.Tensor("int64", BigInt64Array.from(ids, (id) => BigInt(id)), [1, ids.length]),
+        input_lengths: new ort.Tensor("int64", BigInt64Array.from([BigInt(ids.length)]), [1]),
+        scales: new ort.Tensor("float32", Float32Array.from([noiseScale, 1, noiseW]), [3]),
+      });
+      return Float32Array.from(result.output.data);
+    }
+    function trimSilence(samples) {
+      const threshold = 0.02;
+      let start = 0;
+      let end = samples.length - 1;
+      while (start < end && Math.abs(samples[start]) < threshold) start += 1;
+      while (end > start && Math.abs(samples[end]) < threshold) end -= 1;
+      const pad = Math.floor(sampleRate * 0.015);
+      return samples.subarray(Math.max(0, start - pad), Math.min(samples.length, end + pad));
+    }
+    function estimateF0(samples) {
+      const minLag = Math.floor(sampleRate / 400);
+      const maxLag = Math.floor(sampleRate / 70);
+      const length = Math.min(samples.length, Math.floor(sampleRate * 0.25));
+      let best = 0;
+      let bestLag = 0;
+      for (let lag = minLag; lag <= maxLag; lag += 1) {
+        let sum = 0;
+        for (let i = 0; i < length - lag; i += 2) sum += samples[i] * samples[i + lag];
+        if (sum > best) { best = sum; bestLag = lag; }
+      }
+      return bestLag ? sampleRate / bestLag : 196;
+    }
+    function pitchShift(samples, ratio) {
+      const length = Math.max(1, Math.floor(samples.length / ratio));
+      const out = new Float32Array(length);
+      for (let i = 0; i < length; i++) {
+        const position = i * ratio;
+        const index = Math.floor(position);
+        const fraction = position - index;
+        const left = samples[index] || 0;
+        const right = samples[index + 1] || left;
+        out[i] = left + (right - left) * fraction;
+      }
+      return out;
+    }
+    function timeStretch(samples, seconds) {
+      const target = Math.max(1, Math.round(seconds * sampleRate));
+      const grain = Math.floor(sampleRate * 0.04);
+      const hopOut = Math.floor(grain / 2);
+      const hops = Math.max(1, Math.floor(Math.max(0, target - grain) / hopOut));
+      const hopIn = Math.max(1, Math.floor(Math.max(1, samples.length - grain) / hops));
+      const out = new Float32Array(target);
+      for (let hop = 0; hop < hops; hop++) {
+        const source = Math.min(hop * hopIn, Math.max(0, samples.length - grain));
+        const dest = hop * hopOut;
+        for (let i = 0; i < grain && dest + i < target; i++) {
+          const window = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / grain);
+          out[dest + i] += (samples[source + i] || 0) * window;
+        }
+      }
+      return out;
+    }
+    function randomNote(tonic) {
+      const degree = SCALE[Math.floor(Math.random() * SCALE.length)];
+      const octave = Math.random() < 0.35 ? 12 : 0;
+      const midi = tonic + degree + octave;
+      return {
+        midi,
+        hz: 440 * Math.pow(2, (midi - 69) / 12),
+        name: NOTE_NAMES[midi % 12] + Math.floor(midi / 12 - 1),
+      };
+    }
+    async function sing(text) {
+      const phonemes = phonemesFor(text);
+      const syllables = syllabify(phonemes);
+      if (!syllables.length) throw new Error("No syllables to sing.");
+      const tonic = KEY_MIDI[document.querySelector("#key").value];
+      const bpm = Number(tempo.value);
+      const song = [];
+      const captions = [];
+      const gap = new Float32Array(Math.round(sampleRate * 0.03));
+      for (let index = 0; index < syllables.length; index++) {
+        setStatus(`Singing syllable ${index + 1} of ${syllables.length}…`);
+        const raw = trimSilence(await speakIds(idsFor(syllables[index])));
+        const note = randomNote(tonic);
+        const length = LENGTHS[Math.floor(Math.random() * LENGTHS.length)];
+        const pitched = pitchShift(raw, note.hz / estimateF0(raw));
+        song.push(timeStretch(pitched, length.beats * 60 / bpm));
+        if (index < syllables.length - 1) song.push(gap);
+        captions.push(`${note.name} ${length.name}`);
+      }
+      melodyEl.textContent = captions.join("  ·  ");
+      const total = song.reduce((sum, chunk) => sum + chunk.length, 0);
+      const mixed = new Float32Array(total);
+      let offset = 0;
+      for (const chunk of song) { mixed.set(chunk, offset); offset += chunk.length; }
+      return floatToWav(mixed, sampleRate);
+    }
+    singBtn.addEventListener("click", async () => {
+      const text = document.querySelector("#text").value.trim();
+      if (!text) { setStatus("Add a sentence first.", true); return; }
+      singBtn.disabled = true;
+      melodyEl.textContent = "";
+      try {
+        const blob = await sing(text);
+        if (lastUrl) URL.revokeObjectURL(lastUrl);
+        lastUrl = URL.createObjectURL(blob);
+        player.src = lastUrl;
+        await player.play();
+        setStatus("Done.");
+      } catch (error) {
+        console.error(error);
+        setStatus(error.message || String(error), true);
+      } finally {
+        singBtn.disabled = false;
+      }
+    });
+    (async () => {
+      try {
+        await loadPhonemizer();
+        await loadVoice();
+        setGate("Ready", 100);
+        app.hidden = false;
+        gate.remove();
+      } catch (error) {
+        console.error(error);
+        setGate(error.message || String(error), null, true);
+      }
+    })();
+  </script>
+</body>
+</html>
