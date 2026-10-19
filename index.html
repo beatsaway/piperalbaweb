@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Alba</title>
+  <title>Voices</title>
   <style>
     :root {
       --ink: #141414;
@@ -73,6 +73,32 @@
       cursor: pointer;
     }
     button:disabled { opacity: 0.4; cursor: progress; }
+    button.choice {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: #fff;
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px 18px;
+      font-weight: 500;
+    }
+    button.choice strong { display: block; font-size: 18px; letter-spacing: -0.03em; }
+    button.choice span { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; font-weight: 400; }
+    button.choice:hover { border-color: #141414; }
+    .choices { display: grid; gap: 10px; }
+    select {
+      width: 100%;
+      height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      font: inherit;
+      padding: 0 8px;
+    }
+    .voice-pick { width: 180px; }
+    .voice-pick[hidden] { display: none; }
     audio { width: min(360px, 100%); height: 36px; }
     .status { margin: 14px 0 0; min-height: 1.4em; color: var(--muted); font-size: 13px; }
     .status.error { color: #9f2d2d; }
@@ -83,7 +109,8 @@
       padding: 32px;
       background: #fff;
     }
-    .gate-card { width: min(360px, 100%); }
+    .gate-card { width: min(440px, 100%); }
+    #loading[hidden], #choose[hidden] { display: none; }
     .gate-card h1 { font-size: 28px; margin-bottom: 18px; }
     .track {
       height: 2px;
@@ -104,28 +131,58 @@
     @media (max-width: 640px) {
       h1 { font-size: 32px; }
       .row, .actions { display: grid; }
-      .pace, audio { width: 100%; }
+      .pace, .voice-pick, audio { width: 100%; }
     }
   </style>
 </head>
 <body>
   <div id="gate">
     <div class="gate-card">
-      <p class="mark">Alba</p>
-      <h1>Preparing voice</h1>
-      <div class="track" aria-hidden="true"><span id="bar"></span></div>
-      <p id="gate-status">Starting…</p>
+      <div id="choose">
+        <p class="mark">In the browser</p>
+        <h1>Choose a model</h1>
+        <p class="lede">The text box appears after the voice has loaded.</p>
+        <div class="choices">
+          <button class="choice" type="button" data-engine="piper">
+            <strong>Alba</strong>
+            <span>Piper · British English · about 60 MB</span>
+          </button>
+          <button class="choice" type="button" data-engine="kitten">
+            <strong>Kitten nano</strong>
+            <span>Eight English voices · int8 · about 25 MB</span>
+          </button>
+        </div>
+      </div>
+      <div id="loading" hidden>
+        <p class="mark" id="gate-mark">Voice</p>
+        <h1 id="gate-title">Preparing voice</h1>
+        <div class="track" aria-hidden="true"><span id="bar"></span></div>
+        <p id="gate-status">Starting…</p>
+      </div>
     </div>
   </div>
   <main hidden>
-    <p class="mark">Piper · British English</p>
-    <h1>Alba</h1>
-    <p class="lede">A medium voice that speaks in the browser. The model ships with this page.</p>
+    <p class="mark" id="brand-mark">Piper · British English</p>
+    <h1 id="brand-title">Alba</h1>
+    <p class="lede" id="brand-lede">A medium voice that speaks in the browser. The model ships with this page.</p>
     <section class="panel">
       <label for="text">Text</label>
       <textarea id="text">The harbour lights came on one by one, and the ferry horn rolled across the water.</textarea>
       <div class="row">
-        <div class="meta">en_GB · medium · 22,050 Hz</div>
+        <div class="meta" id="brand-meta">en_GB · medium · 22,050 Hz</div>
+        <div class="voice-pick" id="kitten-voice-wrap" hidden>
+          <label for="kitten-voice">Voice</label>
+          <select id="kitten-voice">
+            <option value="Bella">Bella</option>
+            <option value="Jasper">Jasper</option>
+            <option value="Luna">Luna</option>
+            <option value="Bruno" selected>Bruno</option>
+            <option value="Rosie">Rosie</option>
+            <option value="Hugo">Hugo</option>
+            <option value="Kiki">Kiki</option>
+            <option value="Leo">Leo</option>
+          </select>
+        </div>
         <div class="pace">
           <label for="pace">Pace <output id="pace-out">1.00</output></label>
           <input id="pace" type="range" min="0.7" max="1.4" step="0.05" value="1">
@@ -140,10 +197,22 @@
   </main>
 
   <script src="phonemize/piper_phonemize.js"></script>
-  <script src="vendor/ort.min.js"></script>
+  <script src="vendor/ort.min.js?v=118"></script>
   <script>
     const MODEL = "voice/en_GB-alba-medium.onnx";
     const CONFIG = "voice/en_GB-alba-medium.onnx.json";
+    const KITTEN_MODEL = "kitten/kitten_tts_nano_v0_8.onnx";
+    const KITTEN_VOICES = "kitten/voices.npz";
+    const KITTEN_ALIASES = {
+      Bella: "expr-voice-2-f", Jasper: "expr-voice-2-m", Luna: "expr-voice-3-f", Bruno: "expr-voice-3-m",
+      Rosie: "expr-voice-4-f", Hugo: "expr-voice-4-m", Kiki: "expr-voice-5-f", Leo: "expr-voice-5-m",
+    };
+    const KITTEN_SPEED = {
+      "expr-voice-2-f": 0.8, "expr-voice-2-m": 0.8, "expr-voice-3-f": 0.8, "expr-voice-3-m": 0.8,
+      "expr-voice-4-f": 0.8, "expr-voice-4-m": 0.9, "expr-voice-5-f": 0.8, "expr-voice-5-m": 0.8,
+    };
+    const KITTEN_SYMBOLS = "$" + ';:,.!?¡¿—…"«»“” ' + "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz" + "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ";
+    const KITTEN_INDEX = Object.fromEntries([...KITTEN_SYMBOLS].map((symbol, index) => [symbol, index]));
     const gate = document.querySelector("#gate");
     const gateStatus = document.querySelector("#gate-status");
     const bar = document.querySelector("#bar");
@@ -155,7 +224,10 @@
     const paceOut = document.querySelector("#pace-out");
     pace.addEventListener("input", () => { paceOut.textContent = Number(pace.value).toFixed(2); });
 
+    let engine = "piper";
     let session = null;
+    let kittenSession = null;
+    let kittenVoices = null;
     let sampleRate = 22050;
     let noiseScale = 0.667;
     let noiseW = 0.8;
@@ -229,7 +301,7 @@
         const line = raw.trim();
         if (!line.startsWith("{")) continue;
         const parsed = JSON.parse(line);
-        if (parsed.phoneme_ids && parsed.phoneme_ids.length) sentences.push(parsed.phoneme_ids);
+        if (parsed.phoneme_ids && parsed.phoneme_ids.length) sentences.push(parsed);
       }
       return sentences;
     }
@@ -264,7 +336,7 @@
         offset += part.byteLength;
       }
       setGate("Starting the voice…", 92);
-      ort.env.wasm.wasmPaths = "vendor/";
+      ort.env.wasm.wasmPaths = "vendor/118/";
       ort.env.wasm.numThreads = 1;
       ort.env.wasm.simd = true;
       session = await ort.InferenceSession.create(model, {
@@ -272,7 +344,127 @@
       });
     }
 
+    function unzipStored(buffer) {
+      const view = new DataView(buffer);
+      const files = {};
+      let offset = 0;
+      while (offset + 30 < buffer.byteLength) {
+        if (view.getUint32(offset, true) !== 0x04034b50) break;
+        const method = view.getUint16(offset + 8, true);
+        let size = view.getUint32(offset + 18, true);
+        const nameLen = view.getUint16(offset + 26, true);
+        const extraLen = view.getUint16(offset + 28, true);
+        const name = new TextDecoder().decode(new Uint8Array(buffer, offset + 30, nameLen));
+        const extraAt = offset + 30 + nameLen;
+        if (size === 0xffffffff) {
+          const extra = new DataView(buffer, extraAt, extraLen);
+          if (extra.getUint16(0, true) !== 1) throw new Error("The voice file uses an unsupported zip size.");
+          size = Number(extra.getBigUint64(4, true));
+        }
+        const start = extraAt + extraLen;
+        if (method !== 0) throw new Error("The voice file is compressed.");
+        files[name] = new Uint8Array(buffer, start, size);
+        offset = start + size;
+      }
+      return files;
+    }
+
+    function parseFloatNpy(bytes) {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const headerLen = bytes[6] === 1 ? view.getUint16(8, true) : view.getUint32(8, true);
+      const headerStart = bytes[6] === 1 ? 10 : 12;
+      const data = bytes.subarray(headerStart + headerLen);
+      return new Float32Array(data.buffer, data.byteOffset, data.byteLength / 4);
+    }
+
+    function kittenTokens(phonemeLists) {
+      const chunks = [];
+      for (const phonemes of phonemeLists) {
+        const joined = phonemes.join("");
+        const words = joined.match(/[\p{L}\p{N}_]+|[^\p{L}\p{N}_\s]/gu) || [];
+        const ids = [0];
+        for (const symbol of words.join(" ")) {
+          if (KITTEN_INDEX[symbol] != null) ids.push(KITTEN_INDEX[symbol]);
+        }
+        ids.push(10, 0);
+        chunks.push(ids);
+      }
+      return chunks;
+    }
+
+    async function loadKitten() {
+      if (kittenSession) return;
+      setGate("Loading Kitten voices…", 20);
+      const packed = await (await fetch(KITTEN_VOICES)).arrayBuffer();
+      kittenVoices = {};
+      for (const [name, bytes] of Object.entries(unzipStored(packed))) {
+        if (name.endsWith(".npy")) kittenVoices[name.replace(/\.npy$/, "")] = parseFloatNpy(bytes);
+      }
+      setGate("Loading Kitten nano…", 35);
+      const response = await fetch(KITTEN_MODEL);
+      const total = Number(response.headers.get("Content-Length")) || 0;
+      const reader = response.body.getReader();
+      const parts = [];
+      let loaded = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        loaded += value.byteLength;
+        if (total) {
+          const percent = Math.round(loaded / total * 100);
+          setGate(`Loading Kitten nano… ${percent}%`, 35 + percent * 0.5);
+        }
+      }
+      const model = new Uint8Array(loaded);
+      let offset = 0;
+      for (const part of parts) {
+        model.set(part, offset);
+        offset += part.byteLength;
+      }
+      const voiceNote = Object.entries(kittenVoices).map(([name, values]) => `${name}:${values.length}`).join(" ");
+      if (!voiceNote.includes("102400")) throw new Error("Voice table was read wrong. " + voiceNote);
+      setGate("Starting Kitten…", 92);
+      ort.env.wasm.wasmPaths = "vendor/118/";
+      ort.env.wasm.numThreads = 1;
+      ort.env.wasm.simd = true;
+      kittenSession = await ort.InferenceSession.create(model, { executionProviders: ["wasm"] });
+    }
+
+    async function synthesizeKitten(text) {
+      const voiceName = KITTEN_ALIASES[document.querySelector("#kitten-voice").value];
+      const table = kittenVoices[voiceName];
+      const speed = Number(pace.value) * (KITTEN_SPEED[voiceName] || 1);
+      espeakVoice = "en-us";
+      const pieces = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
+      const chunks = [];
+      for (const piece of pieces) {
+        const sentence = piece.trim();
+        if (!sentence) continue;
+        const lists = phonemeIds(await loadPhonemizer(), sentence);
+        const tokenSets = kittenTokens(lists.map((line) => line.phonemes || []));
+        for (const ids of tokenSets) {
+          const row = Math.min(sentence.length, 399);
+          const style = table.subarray(row * 256, row * 256 + 256);
+          const result = await kittenSession.run({
+            input_ids: new ort.Tensor("int64", BigInt64Array.from(ids, (id) => BigInt(id)), [1, ids.length]),
+            style: new ort.Tensor("float32", style, [1, 256]),
+            speed: new ort.Tensor("float32", Float32Array.of(speed), [1]),
+          });
+          let pcm = result.waveform.data;
+          if (pcm.length > 5000) pcm = pcm.subarray(0, pcm.length - 5000);
+          chunks.push(pcm);
+        }
+      }
+      if (!chunks.length) throw new Error("Kitten returned no audio.");
+      return floatToWav(chunks, 24000);
+    }
+
     async function synthesize(text) {
+      if (engine === "kitten") {
+        setStatus("Speaking with Kitten…");
+        return synthesizeKitten(text);
+      }
       const module = await loadPhonemizer();
       await loadVoice();
       const lengthScale = Number(pace.value);
@@ -282,7 +474,7 @@
       const chunks = [];
       const gap = new Float32Array(Math.round(sampleRate * 0.15));
       for (let s = 0; s < sentences.length; s++) {
-        const ids = sentences[s];
+        const ids = sentences[s].phoneme_ids;
         const result = await session.run({
           input: new ort.Tensor("int64", BigInt64Array.from(ids, (id) => BigInt(id)), [1, ids.length]),
           input_lengths: new ort.Tensor("int64", BigInt64Array.from([BigInt(ids.length)]), [1]),
@@ -319,19 +511,40 @@
       }
     });
 
-    (async () => {
-      try {
-        await loadPhonemizer();
-        await loadVoice();
-        setGate("Ready", 100);
-        app.hidden = false;
-        gate.remove();
-        setStatus("Ready.");
-      } catch (error) {
-        console.error(error);
-        setGate(error.message || String(error), null, true);
-      }
-    })();
+    function present(choice) {
+      engine = choice;
+      const kitten = choice === "kitten";
+      document.querySelector("#brand-mark").textContent = kitten ? "Kitten · English" : "Piper · British English";
+      document.querySelector("#brand-title").textContent = kitten ? "Kitten nano" : "Alba";
+      document.querySelector("#brand-lede").textContent = kitten
+        ? "A 15M int8 voice with eight speakers. It speaks in the browser."
+        : "A medium British voice. It speaks in the browser.";
+      document.querySelector("#brand-meta").textContent = kitten ? "English · int8 · 24,000 Hz" : "en_GB · medium · 22,050 Hz";
+      document.querySelector("#kitten-voice-wrap").hidden = !kitten;
+      document.querySelector("#gate-mark").textContent = kitten ? "Kitten nano" : "Alba";
+      document.querySelector("#gate-title").textContent = "Preparing voice";
+    }
+
+    document.querySelectorAll("[data-engine]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        present(button.dataset.engine);
+        document.querySelector("#choose").hidden = true;
+        document.querySelector("#loading").hidden = false;
+        document.querySelectorAll("[data-engine]").forEach((item) => { item.disabled = true; });
+        try {
+          await loadPhonemizer();
+          if (engine === "kitten") await loadKitten();
+          else await loadVoice();
+          setGate("Ready", 100);
+          app.hidden = false;
+          gate.remove();
+          setStatus("Ready.");
+        } catch (error) {
+          console.error(error);
+          setGate(error.message || String(error), null, true);
+        }
+      });
+    });
   </script>
 </body>
 </html>
