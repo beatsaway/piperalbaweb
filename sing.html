@@ -52,7 +52,7 @@
   <main hidden>
     <p class="mark">Major scale</p>
     <h1>Alba sings</h1>
-    <p class="lede">Each syllable gets a random note from a major scale and a random musical length. <a href="index.html">Back to speech</a>.</p>
+    <p class="lede">Alba says the whole sentence first, so the words stay intact. Each syllable is then nudged onto a nearby major-scale note and given a musical length. <a href="index.html">Back to speech</a>.</p>
     <section class="panel">
       <label for="text">Sentence</label>
       <textarea id="text">Sing across the harbour lights.</textarea>
@@ -160,17 +160,17 @@
       });
       return phonemizer;
     }
-    function phonemesFor(text) {
+    function readPhonemes(text) {
       phonemeLines.length = 0;
       phonemizer.callMain(["-l", espeakVoice, "--input", JSON.stringify([{ text }]), "--espeak_data", "/espeak-ng-data"]);
-      const phonemes = [];
+      const lines = [];
       for (const raw of phonemeLines) {
         const line = raw.trim();
         if (!line.startsWith("{")) continue;
         const parsed = JSON.parse(line);
-        if (parsed.phonemes) phonemes.push(...parsed.phonemes);
+        if (parsed.phoneme_ids && parsed.phoneme_ids.length) lines.push(parsed);
       }
-      return phonemes;
+      return lines;
     }
     function syllabify(phonemes) {
       const syllables = [];
@@ -193,17 +193,6 @@
       }
       flush();
       return syllables;
-    }
-    function idsFor(phonemes) {
-      const ids = [...idMap["^"]];
-      const pad = idMap["_"];
-      for (const phone of phonemes) {
-        const token = idMap[phone];
-        if (!token) continue;
-        ids.push(...token, ...pad);
-      }
-      ids.push(...idMap["$"]);
-      return ids;
     }
     async function loadVoice() {
       if (session) return;
@@ -263,7 +252,12 @@
         for (let i = 0; i < length - lag; i += 2) sum += samples[i] * samples[i + lag];
         if (sum > best) { best = sum; bestLag = lag; }
       }
-      return bestLag ? sampleRate / bestLag : 196;
+      if (!bestLag) return 0;
+      let energy = 0;
+      for (let i = 0; i < length; i += 2) energy += samples[i] * samples[i];
+      if (best < energy * 0.25) return 0;
+      const hz = sampleRate / bestLag;
+      return hz >= 120 && hz <= 320 ? hz : 0;
     }
     function pitchShift(samples, ratio) {
       const length = Math.max(1, Math.floor(samples.length / ratio));
@@ -280,7 +274,8 @@
     }
     function timeStretch(samples, seconds) {
       const target = Math.max(1, Math.round(seconds * sampleRate));
-      const grain = Math.floor(sampleRate * 0.04);
+      if (samples.length < sampleRate * 0.12 || Math.abs(samples.length - target) < sampleRate * 0.04) return samples;
+      const grain = Math.floor(sampleRate * 0.05);
       const hopOut = Math.floor(grain / 2);
       const hops = Math.max(1, Math.floor(Math.max(0, target - grain) / hopOut));
       const hopIn = Math.max(1, Math.floor(Math.max(1, samples.length - grain) / hops));
@@ -295,33 +290,74 @@
       }
       return out;
     }
-    function randomNote(tonic) {
-      const degree = SCALE[Math.floor(Math.random() * SCALE.length)];
-      const octave = Math.random() < 0.35 ? 12 : 0;
-      const midi = tonic + degree + octave;
+    function splitByEnergy(samples, count) {
+      if (count <= 1) return [samples];
+      const frame = Math.max(1, Math.floor(sampleRate * 0.02));
+      const energy = [];
+      for (let i = 0; i < samples.length; i += frame) {
+        let sum = 0;
+        const end = Math.min(samples.length, i + frame);
+        for (let j = i; j < end; j++) sum += samples[j] * samples[j];
+        energy.push(Math.sqrt(sum / (end - i)));
+      }
+      const cuts = [0];
+      for (let part = 1; part < count; part++) {
+        const center = Math.round(energy.length * part / count);
+        const reach = Math.max(2, Math.round(energy.length * 0.1));
+        let best = center;
+        let quietest = Infinity;
+        const from = Math.max(cuts[cuts.length - 1] / frame + 2, center - reach);
+        const to = Math.min(energy.length - 2, center + reach);
+        for (let i = from; i <= to; i++) {
+          if (energy[Math.floor(i)] < quietest) {
+            quietest = energy[Math.floor(i)];
+            best = Math.floor(i);
+          }
+        }
+        cuts.push(best * frame);
+      }
+      cuts.push(samples.length);
+      return cuts.slice(0, -1).map((start, index) => samples.subarray(start, Math.max(start + 1, cuts[index + 1])));
+    }
+    function nearbyScaleNote(f0, tonicMidi) {
+      const spoken = 69 + 12 * Math.log2(f0 / 440);
+      const root = tonicMidi % 12;
+      const scalePcs = new Set(SCALE.map((degree) => (root + degree) % 12));
+      const options = [];
+      for (let candidate = Math.round(spoken) - 3; candidate <= Math.round(spoken) + 3; candidate++) {
+        const pitchClass = ((candidate % 12) + 12) % 12;
+        if (scalePcs.has(pitchClass)) options.push(candidate);
+      }
+      const chosen = options.length ? options[Math.floor(Math.random() * options.length)] : Math.round(spoken);
       return {
-        midi,
-        hz: 440 * Math.pow(2, (midi - 69) / 12),
-        name: NOTE_NAMES[midi % 12] + Math.floor(midi / 12 - 1),
+        ratio: Math.pow(2, (chosen - spoken) / 12),
+        name: NOTE_NAMES[((chosen % 12) + 12) % 12] + Math.floor(chosen / 12 - 1),
       };
     }
     async function sing(text) {
-      const phonemes = phonemesFor(text);
-      const syllables = syllabify(phonemes);
-      if (!syllables.length) throw new Error("No syllables to sing.");
+      setStatus("Speaking the sentence…");
+      const lines = readPhonemes(text);
+      if (!lines.length) throw new Error("The phonemizer returned no speech.");
+      const spoken = [];
+      for (const line of lines) spoken.push(await speakIds(line.phoneme_ids));
+      const totalSpoken = spoken.reduce((sum, chunk) => sum + chunk.length, 0);
+      const voice = new Float32Array(totalSpoken);
+      let cursor = 0;
+      for (const chunk of spoken) { voice.set(chunk, cursor); cursor += chunk.length; }
+      const syllableCount = Math.max(1, syllabify(lines.flatMap((line) => line.phonemes || [])).length);
+      const pieces = splitByEnergy(trimSilence(voice), syllableCount);
+      const voicePitch = estimateF0(voice) || 196;
       const tonic = KEY_MIDI[document.querySelector("#key").value];
-      const bpm = Number(tempo.value);
+      const quarter = 60 / Number(tempo.value);
       const song = [];
       const captions = [];
-      const gap = new Float32Array(Math.round(sampleRate * 0.03));
-      for (let index = 0; index < syllables.length; index++) {
-        setStatus(`Singing syllable ${index + 1} of ${syllables.length}…`);
-        const raw = trimSilence(await speakIds(idsFor(syllables[index])));
-        const note = randomNote(tonic);
+      for (const piece of pieces) {
+        const note = nearbyScaleNote(estimateF0(piece) || voicePitch, tonic);
         const length = LENGTHS[Math.floor(Math.random() * LENGTHS.length)];
-        const pitched = pitchShift(raw, note.hz / estimateF0(raw));
-        song.push(timeStretch(pitched, length.beats * 60 / bpm));
-        if (index < syllables.length - 1) song.push(gap);
+        const natural = piece.length / sampleRate;
+        const wanted = length.beats * quarter;
+        const seconds = natural * Math.min(1.35, Math.max(0.8, wanted / natural));
+        song.push(timeStretch(pitchShift(piece, note.ratio), seconds));
         captions.push(`${note.name} ${length.name}`);
       }
       melodyEl.textContent = captions.join("  ·  ");
