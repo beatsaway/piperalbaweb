@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Alba</title>
+  <style>
+    :root {
+      --ink: #141414;
+      --muted: #737373;
+      --line: #ececec;
+      --soft: #f7f7f7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background: #fff;
+      font: 15px/1.5 "Segoe UI", system-ui, sans-serif;
+    }
+    main { width: min(680px, calc(100% - 40px)); margin: 0 auto; padding: 56px 0 80px; }
+    .mark {
+      margin: 0 0 18px;
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    h1 { margin: 0; font-size: 40px; line-height: 1.05; font-weight: 560; letter-spacing: -0.045em; }
+    .lede { margin: 12px 0 28px; max-width: 42ch; color: var(--muted); }
+    .panel {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 20px;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+    }
+    label { display: block; margin-bottom: 8px; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+    textarea {
+      width: 100%;
+      min-height: 148px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px 16px;
+      font: inherit;
+      color: inherit;
+      background: var(--soft);
+    }
+    textarea:focus { outline: none; border-color: #cfcfcf; background: #fff; }
+    .row { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin: 18px 0 8px; }
+    .meta { color: var(--muted); font-size: 13px; }
+    .pace { width: 180px; }
+    output { font-variant-numeric: tabular-nums; color: var(--ink); }
+    input[type="range"] { width: 100%; accent-color: #141414; }
+    .actions {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--line);
+    }
+    button {
+      border: 0;
+      background: var(--ink);
+      color: #fff;
+      border-radius: 999px;
+      padding: 11px 20px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.4; cursor: progress; }
+    audio { width: min(360px, 100%); height: 36px; }
+    .status { margin: 14px 0 0; min-height: 1.4em; color: var(--muted); font-size: 13px; }
+    .status.error { color: #9f2d2d; }
+    @media (max-width: 640px) {
+      h1 { font-size: 32px; }
+      .row, .actions { display: grid; }
+      .pace, audio { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="mark">Piper · British English</p>
+    <h1>Alba</h1>
+    <p class="lede">A medium voice that speaks in the browser. The model ships with this page.</p>
+    <section class="panel">
+      <label for="text">Text</label>
+      <textarea id="text">The harbour lights came on one by one, and the ferry horn rolled across the water.</textarea>
+      <div class="row">
+        <div class="meta">en_GB · medium · 22,050 Hz</div>
+        <div class="pace">
+          <label for="pace">Pace <output id="pace-out">1.00</output></label>
+          <input id="pace" type="range" min="0.7" max="1.4" step="0.05" value="1">
+        </div>
+      </div>
+      <div class="actions">
+        <button id="speak" type="button">Speak</button>
+        <audio id="player" controls></audio>
+      </div>
+      <p class="status" id="status" role="status">Press Speak. The first run loads the voice into memory.</p>
+    </section>
+  </main>
+
+  <script src="phonemize/piper_phonemize.js"></script>
+  <script src="vendor/ort.min.js"></script>
+  <script>
+    const MODEL = "voice/en_GB-alba-medium.onnx";
+    const CONFIG = "voice/en_GB-alba-medium.onnx.json";
+    const statusEl = document.querySelector("#status");
+    const player = document.querySelector("#player");
+    const speakBtn = document.querySelector("#speak");
+    const pace = document.querySelector("#pace");
+    const paceOut = document.querySelector("#pace-out");
+    pace.addEventListener("input", () => { paceOut.textContent = Number(pace.value).toFixed(2); });
+
+    let session = null;
+    let sampleRate = 22050;
+    let noiseScale = 0.667;
+    let noiseW = 0.8;
+    let espeakVoice = "en-gb-x-rp";
+    let phonemizer = null;
+    let lastUrl = "";
+
+    function setStatus(message, isError = false) {
+      statusEl.textContent = message;
+      statusEl.classList.toggle("error", isError);
+    }
+
+    function floatToWav(chunks, rate) {
+      const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const pcm = new Int16Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        for (let i = 0; i < chunk.length; i++) {
+          const sample = Math.max(-1, Math.min(1, chunk[i]));
+          pcm[offset++] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+        }
+      }
+      const buffer = new ArrayBuffer(44 + pcm.byteLength);
+      const view = new DataView(buffer);
+      const write = (at, text) => { for (let i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i)); };
+      write(0, "RIFF");
+      view.setUint32(4, 36 + pcm.byteLength, true);
+      write(8, "WAVE");
+      write(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, rate, true);
+      view.setUint32(28, rate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      write(36, "data");
+      view.setUint32(40, pcm.byteLength, true);
+      new Int16Array(buffer, 44).set(pcm);
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    const phonemeLines = [];
+
+    async function loadPhonemizer() {
+      if (phonemizer) return phonemizer;
+      setStatus("Loading the English phonemizer…");
+      phonemizer = await createPiperPhonemize({
+        locateFile: (path) => `phonemize/${path}`,
+        print: (data) => phonemeLines.push(String(data)),
+        printErr: (line) => console.warn(line),
+      });
+      return phonemizer;
+    }
+
+    function phonemeIds(module, text) {
+      phonemeLines.length = 0;
+      module.callMain([
+        "-l", espeakVoice,
+        "--input", JSON.stringify([{ text }]),
+        "--espeak_data", "/espeak-ng-data",
+      ]);
+      const sentences = [];
+      for (const raw of phonemeLines) {
+        const line = raw.trim();
+        if (!line.startsWith("{")) continue;
+        const parsed = JSON.parse(line);
+        if (parsed.phoneme_ids && parsed.phoneme_ids.length) sentences.push(parsed.phoneme_ids);
+      }
+      return sentences;
+    }
+
+    async function loadVoice() {
+      if (session) return;
+      const config = await (await fetch(CONFIG)).json();
+      sampleRate = config.audio.sample_rate;
+      noiseScale = config.inference.noise_scale;
+      noiseW = config.inference.noise_w;
+      espeakVoice = config.espeak.voice || espeakVoice;
+      setStatus("Loading Alba medium…");
+      const response = await fetch(MODEL);
+      const total = Number(response.headers.get("Content-Length")) || 0;
+      const reader = response.body.getReader();
+      const parts = [];
+      let loaded = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        parts.push(value);
+        loaded += value.byteLength;
+        if (total) setStatus(`Loading Alba medium… ${Math.round(loaded / total * 100)}%`);
+      }
+      const model = new Uint8Array(loaded);
+      let offset = 0;
+      for (const part of parts) {
+        model.set(part, offset);
+        offset += part.byteLength;
+      }
+      ort.env.wasm.wasmPaths = "vendor/";
+      ort.env.wasm.numThreads = 1;
+      ort.env.wasm.simd = true;
+      session = await ort.InferenceSession.create(model, {
+        executionProviders: ["wasm"],
+      });
+    }
+
+    async function synthesize(text) {
+      const module = await loadPhonemizer();
+      await loadVoice();
+      const lengthScale = Number(pace.value);
+      const sentences = phonemeIds(module, text);
+      if (!sentences.length) throw new Error("The phonemizer returned no speech ids.");
+      setStatus("Speaking with Alba…");
+      const chunks = [];
+      const gap = new Float32Array(Math.round(sampleRate * 0.15));
+      for (let s = 0; s < sentences.length; s++) {
+        const ids = sentences[s];
+        const result = await session.run({
+          input: new ort.Tensor("int64", BigInt64Array.from(ids, (id) => BigInt(id)), [1, ids.length]),
+          input_lengths: new ort.Tensor("int64", BigInt64Array.from([BigInt(ids.length)]), [1]),
+          scales: new ort.Tensor("float32", Float32Array.from([noiseScale, lengthScale, noiseW]), [3]),
+        });
+        const pcm = result.output.data;
+        chunks.push(pcm);
+        if (s < sentences.length - 1) chunks.push(gap);
+      }
+      return floatToWav(chunks, sampleRate);
+    }
+
+    speakBtn.addEventListener("click", async () => {
+      const text = document.querySelector("#text").value.trim();
+      if (!text) {
+        setStatus("Add a sentence first.", true);
+        return;
+      }
+      speakBtn.disabled = true;
+      const started = performance.now();
+      try {
+        const blob = await synthesize(text);
+        if (lastUrl) URL.revokeObjectURL(lastUrl);
+        lastUrl = URL.createObjectURL(blob);
+        player.src = lastUrl;
+        await player.play();
+        const seconds = ((performance.now() - started) / 1000).toFixed(1);
+        setStatus(`Finished in ${seconds}s. ${(blob.size / 1024).toFixed(0)} KB wav.`);
+      } catch (error) {
+        console.error(error);
+        setStatus(error.message || String(error), true);
+      } finally {
+        speakBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
